@@ -3,6 +3,9 @@ using System;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text;
 
 namespace Neo4jClientDriver
 {
@@ -20,6 +23,7 @@ namespace Neo4jClientDriver
 
         public class TreeNodeDataEntity
         {
+            [JsonIgnore]
             public long Id { get; set; }
         }
 
@@ -142,17 +146,20 @@ namespace Neo4jClientDriver
                 await CreateTreeNode(treeNode);
             }
 
-            public async Task<long> CreateNode(TreeNode<Person> treeNode)
+            public async Task<long> CreateNode<TreeNodeData>(TreeNode<TreeNodeData> treeNode) where TreeNodeData : TreeNodeDataEntity
             {
                 if (treeNode == null)
                 {
                     return 0;
                 }
 
+                var json = JsonSerializer.Serialize(treeNode.Data).AsQueryable();
+                var cypherPropesties = CypherSerializeToCreatePropertiesObject(treeNode.Data);
+
+                string cypherQuery = "(j:" + nameof(treeNode.Data) + cypherPropesties + ")";
+
                 long createdId = (await _client.Cypher
-                    .Create("(j:" + nameof(treeNode.Data.Name) + " {"
-                    + nameof(treeNode.Data.Name) + ": '" + treeNode.Data.Name + "', "
-                    + nameof(treeNode.Data.Role) + ": '" + treeNode.Data.Role + "'})").WithIdentifier("id")
+                    .Create(cypherQuery)
                     .Return((j) => j.Id()
                     ).ResultsAsync).FirstOrDefault();
 
@@ -160,18 +167,78 @@ namespace Neo4jClientDriver
                 return createdId;
             }
 
-            public async Task UpdateNode(TreeNode<Person> treeNode, long nodeId)
+            public string CypherSerializeToCreatePropertiesObject(object objectToSerialize)
             {
-                if (treeNode == null)
+                var queryableChar = JsonSerializer.Serialize(objectToSerialize)
+                    .AsQueryable();
+                bool remove = true;
+                StringBuilder cypherProperties = new StringBuilder();
+                foreach(var character in queryableChar)
+                {
+                    if (character.Equals(':'))
+                    {
+                        remove = false;
+                    }
+                    if (character.Equals(','))
+                    {
+                        remove = true;
+                    }
+                    if (character.Equals('"') && remove)
+                    {
+                        continue;
+                    }
+                    cypherProperties.Append(character);
+                }
+                return cypherProperties.ToString();
+            }
+
+            public string CypherSerializeToSetPropertiesQuery(string node, object objectToSerialize)
+            {
+                var queryableChar = JsonSerializer.Serialize(objectToSerialize)
+                    .AsQueryable();
+                bool remove = true;
+                StringBuilder cypherProperties = new StringBuilder();
+                node += ".";
+                cypherProperties.Append(node);
+                foreach (var character in queryableChar)
+                {
+                    if (character.Equals('{') || character.Equals('}'))
+                    {
+                        continue;
+                    }
+                    if (character.Equals(':'))
+                    {
+                        remove = false;
+                        cypherProperties.Append('=');
+                        continue;
+                    }
+                    if (character.Equals(','))
+                    {
+                        remove = true;
+                        cypherProperties.Append(character);
+                        cypherProperties.Append(node);
+                        continue;
+                    }
+                    if (character.Equals('"') && remove)
+                    {
+                        continue;
+                    }
+                    cypherProperties.Append(character);
+                }
+                return cypherProperties.ToString();
+            }
+
+            public async Task UpdateNode<TreeNodeData>(TreeNode<TreeNodeData> treeNode, long nodeId) where TreeNodeData : TreeNodeDataEntity
+            {
+                if (treeNode == null || treeNode.Data == null)
                 {
                     return;
                 }
-
+                var setQuery = CypherSerializeToSetPropertiesQuery("node", treeNode.Data);
                 await _client.Cypher
-                    .Match("(n)")
-                    .Where("id(n) = " + nodeId.ToString())
-                    .Set("n."+nameof(Person.Name)+" = '"+ treeNode.Data.Name+"'")
-                    .Set("n."+nameof(Person.Role)+" = '"+ treeNode.Data.Role+"'")
+                    .Match("(node)")
+                    .Where("id(node) = " + nodeId.ToString())
+                    .Set(setQuery)
                     .ExecuteWithoutResultsAsync();
             }
 
@@ -184,7 +251,7 @@ namespace Neo4jClientDriver
                     .ExecuteWithoutResultsAsync();
             }
 
-            public async Task CreateRelationshipWithParent(TreeNode<Person> treeNode)
+            public async Task CreateRelationshipWithParent<TreeNodeData>(TreeNode<TreeNodeData> treeNode) where TreeNodeData : TreeNodeDataEntity
             {
                 if (treeNode != null && treeNode.Parent != null)
                 {
@@ -192,14 +259,16 @@ namespace Neo4jClientDriver
                 }
             }
 
-            public async Task<long> CreateRelationship(TreeNode<Person> treeNodeA, TreeNode<Person> treeNodeB)
+            public async Task<long> CreateRelationship<TreeNodeData>(TreeNode<TreeNodeData> treeNodeA, TreeNode<TreeNodeData> treeNodeB) where TreeNodeData : TreeNodeDataEntity
             {
                 if (treeNodeA != null && treeNodeA.Data != null && treeNodeB != null && treeNodeB.Data != null)
                 {
                     return (await _client.Cypher
-                        .Match("(j:" + nameof(treeNodeA.Data.Name) + " {" + nameof(treeNodeA.Data.Name) + ": '" + treeNodeA.Data.Name + "'})")
-                        .Match("(k:" + nameof(treeNodeB.Data.Name) + " {" + nameof(treeNodeB.Data.Name) + ": '" + treeNodeB.Data.Name + "'})")
-                        .Merge("(j)-[r:" + treeNodeA.GetRelationshipId(treeNodeB) + " {Name: '" + treeNodeA.GetRelationshipId(treeNodeB) + "'}]->(k)")
+                        .Match("(nodeA)")
+                        .Where("id(nodeA) = "+ treeNodeA.Data.Id)
+                        .Match("(nodeB)")
+                        .Where("id(nodeB) = "+ treeNodeB.Data.Id)
+                        .Merge("(nodeA)-[r:" + treeNodeA.GetRelationshipId(treeNodeB) + " {Name: '" + treeNodeA.GetRelationshipId(treeNodeB) + "'}]->(nodeB)")
                         .Return((r) => r.Id())
                         .ResultsAsync).FirstOrDefault();
                 }
@@ -222,7 +291,7 @@ namespace Neo4jClientDriver
                     .Match("()-[r]-()")
                     .Where("id(r) = " + relationshipId.ToString())
                     .Return((r) => r.As<Relationship>()).ResultsAsync).FirstOrDefault();
-                if(relationship != null)
+                if (relationship != null)
                 {
                     relationship.Id = relationshipId;
                 }
@@ -240,12 +309,12 @@ namespace Neo4jClientDriver
 
             public async Task UpdateRelationship(Relationship relationship, long relationshipId)
             {
-                if(relationship != null)
+                if (relationship != null)
                 {
                     await _client.Cypher
                         .Match("()-[r]-()")
                         .Where("id(r) = " + relationshipId.ToString())
-                        .Set("r."+nameof(Relationship.Name)+"='"+ relationship.Name+"'")
+                        .Set("r." + nameof(Relationship.Name) + "='" + relationship.Name + "'")
                         .ExecuteWithoutResultsAsync();
                 }
             }
@@ -263,7 +332,7 @@ namespace Neo4jClientDriver
                 Person node = (await _client.Cypher.Match("(n)")
                     .Where("id(n) = " + nodeId.ToString())
                     .Return<Person>("n").ResultsAsync).FirstOrDefault();
-                if(node != null)
+                if (node != null)
                 {
                     node.Id = nodeId;
                 }
